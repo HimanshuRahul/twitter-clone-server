@@ -4,6 +4,7 @@ import JWTService from "../../services/jwt";
 import { GraphqlContext } from "../../interfaces";
 import UserService from "../../services/user";
 import { User } from "@prisma/client";
+import { redisClient } from "../../clients/redis";
 
 
 
@@ -45,6 +46,36 @@ const extraResolvers = {
                 }
             })
             return result.map((el) => el.following)
+        },
+        recommendedUsers: async (parent: any, _: any, ctx: GraphqlContext) => {
+            if(!ctx.user) return []
+            const cachedValue = await redisClient.get(`RECOMMENDED_USERS:${ctx.user.id}`)
+
+            if(cachedValue) return JSON.parse(cachedValue)
+
+            const myFollowings = await prismaClient.follows.findMany({
+                where: {
+                    follower: { id: ctx.user.id }
+                },
+                include: {
+                    following: { include: { followers: { include: { following: true }} }}
+                },
+            })
+
+            const users: User[] = []
+
+            for(const followings of myFollowings){
+                for(const followingOfFollowedUser of followings.following.followers){
+                    if( followingOfFollowedUser.following.id !== ctx.user.id &&
+                        myFollowings.findIndex(e => e?.followingId === followingOfFollowedUser.following.id) < 0){
+                            users.push(followingOfFollowedUser.following)
+                        }
+                }
+            }
+
+            await redisClient.set(`RECOMMENDED_USERS:${ctx.user.id}`, JSON.stringify(users))
+
+            return users;
         }
     }
 }
@@ -53,12 +84,14 @@ const mutations = {
     followUser: async (parent: any, { to }:{to: string}, ctx: GraphqlContext) => {
         if(!ctx.user || !ctx.user.id) throw new Error("Unauthenticated");
         await UserService.followUser(ctx.user.id, to);
+        await redisClient.del(`RECOMMENDED_USERS:${ctx.user.id}`);
         return true
     },
 
     unFollowUser: async (parent: any, { to }:{to: string}, ctx: GraphqlContext) => {
         if(!ctx.user || !ctx.user.id) throw new Error("Unauthenticated");
         await UserService.unFollowUser(ctx.user.id, to);
+        await redisClient.del(`RECOMMENDED_USERS:${ctx.user.id}`);
         return true
     }
 }
